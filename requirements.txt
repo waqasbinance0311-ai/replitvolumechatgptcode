@@ -1,9 +1,6 @@
-python-telegram-bot==20.3
-requests
-pandas
-ta
-numpy
-pandas
-python-telegram-bot==20.3
-requests
-ta
+python-telegram-bot==20.7
+requests==2.32.3
+pandas==2.2.3
+numpy==2.0.1
+ta-lib==0.4.28
+python-binance==1.0.19
