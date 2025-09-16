@@ -1,0 +1,9 @@
+python-telegram-bot==20.3
+requests
+pandas
+ta
+numpy
+pandas
+python-telegram-bot==20.3
+requests
+ta
