@@ -484,5 +484,5 @@ def main_loop():
             print(f"❌ Main loop error: {e}")
             time.sleep(60)  # Wait longer on critical errors
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     main_loop()
