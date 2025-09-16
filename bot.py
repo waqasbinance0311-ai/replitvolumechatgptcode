@@ -1,9 +1,6 @@
 import os
 import requests
 import time
-import pytz
-from datetime import datetime
-from telegram import Bot
 
 # ================== CONFIGURATION ==================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8023108538:AAE51wAdhjHSv6TQOYBBe7RS0jIrOTRoOcs")
@@ -15,8 +12,6 @@ ACCOUNT_BALANCE_USDT = 10000     # Total Balance
 RISK_PER_TRADE_PERCENT = 0.07    # Risk per trade (%)
 CHECK_INTERVAL = 60              # Check every X seconds
 # ===================================================
-
-bot = Bot(token=TELEGRAM_TOKEN)
 
 # -------------------- Binance API --------------------
 def get_binance_data(symbol):
@@ -38,14 +33,14 @@ def analyze_symbol(symbol):
     volume = float(data["volume"])
     price_change = float(data["priceChangePercent"])
 
-    # --- Simple logic (just for alert demo) ---
+    # --- Simple trading logic ---
     action = None
-    if price_change > 2:
+    if price_change > 2:       # Example rule → Buy if pump > 2%
         action = "BUY"
-    elif price_change < -2:
+    elif price_change < -2:    # Example rule → Sell if dump < -2%
         action = "SELL"
 
-    # --- Risk management (custom fixed SL/TP) ---
+    # --- Risk management (fixed SL/TP) ---
     sl = tp = position_size = None
     if action:
         if action == "BUY":
@@ -89,8 +84,9 @@ def send_alert(signal):
         f"📏 Position Size: {signal['position_size']:.2f} units"
     )
 
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        bot.send_message(chat_id=CHAT_ID, text=msg)
+        requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=10)
         print(f"✅ Alert sent for {signal['symbol']}")
     except Exception as e:
         print(f"❌ Telegram Error: {e}")
@@ -107,4 +103,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
