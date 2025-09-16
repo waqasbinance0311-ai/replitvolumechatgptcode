@@ -138,13 +138,30 @@ def vwap(df: pd.DataFrame):
     return pv.cumsum() / df['volume'].cumsum()
 
 def atr(df: pd.DataFrame, length: int = 14):
-    """Average True Range"""
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    
-    true_range = np.maximum.reduce([high_low, high_close, low_close])
-    return true_range.ewm(span=length, adjust=False).mean()
+    """Average True Range - Fixed Version"""
+    try:
+        # Ensure we're working with pandas Series
+        high = df['high']
+        low = df['low'] 
+        close = df['close']
+        
+        # Calculate True Range components
+        tr1 = high - low
+        tr2 = (high - close.shift()).abs()
+        tr3 = (low - close.shift()).abs()
+        
+        # Get maximum of the three
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        # Calculate ATR using EMA
+        atr_value = true_range.ewm(span=length, adjust=False).mean()
+        
+        return atr_value
+        
+    except Exception as e:
+        print(f"ATR calculation error: {e}")
+        # Return a series of zeros with same length as input
+        return pd.Series([0.0] * len(df), index=df.index)
 
 # -------------------- Signal Analysis --------------------
 def analyze_symbol(symbol):
@@ -154,6 +171,12 @@ def analyze_symbol(symbol):
         if df is None or len(df) < 50:
             print(f"⚠  Insufficient data for {symbol}")
             return None
+            
+        # Ensure we have enough data for indicators
+        if len(df) < 30:
+            print(f"⚠  Not enough data for indicators: {symbol}")
+            return None
+            
     except Exception as e:
         print(f"Error analyzing {symbol}: {e}")
         return None
@@ -164,7 +187,7 @@ def analyze_symbol(symbol):
         df['EMA21'] = ema(df['close'], 21)
         df['RSI14'] = rsi(df['close'], 14)
         df['VWAP'] = vwap(df)
-        df['ATR14'] = atr(df, 14)
+        df['ATR14'] = atr(df, 14)  # This will use the fixed function now
     except Exception as e:
         print(f"Indicator calculation error for {symbol}: {e}")
         return None
@@ -461,5 +484,5 @@ def main_loop():
             print(f"❌ Main loop error: {e}")
             time.sleep(60)  # Wait longer on critical errors
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     main_loop()
