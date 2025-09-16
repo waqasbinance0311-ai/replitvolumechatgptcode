@@ -1,12 +1,12 @@
 """
-Pro Scalper Bot
+Pro Scalper Bot - Render Optimized
 - Timeframes: 1m (main), uses rolling stats to detect spikes
 - Indicators: EMA(9,21), RSI(14), VWAP, ATR(14)
 - Extra checks: Volume spike (vs avg), Orderbook imbalance (bid/ask depth)
 - Risk mgmt: account balance, risk% per trade, SL from ATR, TP by R:R ratio
 - Sends Telegram alerts with signal, TP, SL, confidence score
 
-Save as pro_scalper_bot.py and run: python pro_scalper_bot.py
+Optimized for Render.com deployment
 """
 
 import requests
@@ -16,171 +16,218 @@ import csv
 from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
-
-# ================== CONFIG (edit as needed) ==================
 import os
 
+# ================== CONFIGURATION ==================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Enable test mode if Telegram credentials are missing
-TEST_MODE = not (TELEGRAM_TOKEN and CHAT_ID)
+TEST_MODE = not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 if TEST_MODE:
-    print("⚠️  TEST MODE: Running without Telegram notifications")
-    print("Set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID in Replit secrets to enable alerts")
-    TELEGRAM_TOKEN = "test_token"
-    CHAT_ID = "test_chat"
-SYMBOLS = ["DOGEUSDT","XRPUSDT","LTCUSDT","BTCUSDT","ETHUSDT"]  # change list to monitor
-MAIN_INTERVAL = "1m"   # scalping timeframe
-FETCH_CANDLES = 200    # number of candles to fetch for indicators
-CHECK_INTERVAL = 20    # seconds between checks (choose 20-60 for scalping)
+    print("⚠  TEST MODE: Running without Telegram notifications")
+    print("Set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID as environment variables")
+
+SYMBOLS = ["DOGEUSDT", "XRPUSDT", "LTCUSDT", "BTCUSDT", "ETHUSDT"]
+MAIN_INTERVAL = "1m"
+FETCH_CANDLES = 200
+CHECK_INTERVAL = 20
 ACCOUNT_BALANCE_USDT = 1000.0
-RISK_PER_TRADE_PERCENT = 1.0  # percent of account balance risked per trade
-RR_RATIO = 1.8  # take-profit risk-reward ratio
-VOLUME_SPIKE_MULTIPLIER = 1.6  # last candle volume > multiplier * avg volume -> spike
-ORDERBOOK_DEPTH = 10  # levels to sum for imbalance
-MIN_CONFIDENCE_TO_ALERT = 75  # percent - increased for stronger signals only
+RISK_PER_TRADE_PERCENT = 1.0
+RR_RATIO = 1.8
+VOLUME_SPIKE_MULTIPLIER = 1.6
+ORDERBOOK_DEPTH = 10
+MIN_CONFIDENCE_TO_ALERT = 75
 LOG_CSV = "pro_scalper_signals.csv"
-# ============================================================
+# ===================================================
 
-HEADERS = {"User-Agent":"pro-scalper-bot/1.0"}
+HEADERS = {"User-Agent": "pro-scalper-bot/1.0 (Render)"}
 
-# -------------------- Utility / Market Data --------------------
+# -------------------- Utility Functions --------------------
 def send_telegram(message: str):
+    """Send Telegram notification with proper error handling"""
     if TEST_MODE:
         print(f"📧 [TEST MODE] Would send: {message}")
-        return
+        return True
         
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID, 
+        "text": message, 
+        "parse_mode": "HTML"
+    }
+    
     try:
-        r = requests.post(url, data=payload, timeout=8)
-        if r.status_code != 200:
-            print("Telegram send error:", r.status_code, r.text)
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            return True
+        else:
+            print(f"Telegram API Error: {response.status_code} - {response.text}")
+            return False
     except Exception as e:
-        print("Telegram exception:", e)
+        print(f"Telegram Send Exception: {e}")
+        return False
 
 def fetch_klines(symbol: str, interval: str = "1m", limit: int = 200):
+    """Fetch OHLCV data from Binance with error handling"""
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    r = requests.get(url, params=params, timeout=8, headers=HEADERS)
-    data = r.json()
-    # kline format: [ openTime, open, high, low, close, volume, closeTime, ... ]
-    df = pd.DataFrame(data, columns=[
-        "open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base","taker_quote","ignore"
-    ])
-    df = df.astype({
-        "open": float, "high": float, "low": float, "close": float, "volume": float,
-        "open_time": int, "close_time": int
-    })
-    df['datetime'] = pd.to_datetime(df['close_time'], unit='ms')
-    return df
+    
+    try:
+        response = requests.get(url, params=params, timeout=10, headers=HEADERS)
+        response.raise_for_status()
+        data = response.json()
+        
+        df = pd.DataFrame(data, columns=[
+            "open_time", "open", "high", "low", "close", "volume", 
+            "close_time", "qav", "num_trades", "taker_base", "taker_quote", "ignore"
+        ])
+        
+        # Convert to appropriate data types
+        numeric_columns = ["open", "high", "low", "close", "volume"]
+        for col in numeric_columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        df['open_time'] = pd.to_numeric(df['open_time'], errors='coerce')
+        df['close_time'] = pd.to_numeric(df['close_time'], errors='coerce')
+        df['datetime'] = pd.to_datetime(df['close_time'], unit='ms')
+        
+        # Drop any rows with NaN values
+        df = df.dropna()
+        
+        return df
+        
+    except Exception as e:
+        print(f"Error fetching klines for {symbol}: {e}")
+        return None
 
 def fetch_orderbook(symbol: str, limit: int = 50):
+    """Fetch orderbook data with error handling"""
     url = "https://api.binance.com/api/v3/depth"
     params = {"symbol": symbol, "limit": limit}
-    r = requests.get(url, params=params, timeout=6, headers=HEADERS)
-    return r.json()
+    
+    try:
+        response = requests.get(url, params=params, timeout=8, headers=HEADERS)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"Error fetching orderbook for {symbol}: {e}")
+        return {"bids": [], "asks": []}
 
-# -------------------- Indicators --------------------
+# -------------------- Technical Indicators --------------------
 def ema(series: pd.Series, length: int):
+    """Exponential Moving Average"""
     return series.ewm(span=length, adjust=False).mean()
 
 def rsi(series: pd.Series, length: int = 14):
+    """Relative Strength Index"""
     delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    ma_up = up.ewm(alpha=1/length, adjust=False).mean()
-    ma_down = down.ewm(alpha=1/length, adjust=False).mean()
-    rs = ma_up / (ma_down + 1e-9)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(alpha=1/length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/length, adjust=False).mean()
+    
+    rs = avg_gain / (avg_loss + 1e-9)
+    return 100 - (100 / (1 + rs))
 
 def vwap(df: pd.DataFrame):
-    # vwap over provided candles
-    pv = (df['close'] * df['volume']).astype(float)
+    """Volume Weighted Average Price"""
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    pv = typical_price * df['volume']
     return pv.cumsum() / df['volume'].cumsum()
 
 def atr(df: pd.DataFrame, length: int = 14):
+    """Average True Range"""
     high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = tr.ewm(span=length, adjust=False).mean()
-    return atr
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
+    
+    true_range = np.maximum.reduce([high_low, high_close, low_close])
+    return true_range.ewm(span=length, adjust=False).mean()
 
-# -------------------- Signal Logic --------------------
+# -------------------- Signal Analysis --------------------
 def analyze_symbol(symbol):
+    """Comprehensive technical analysis for a symbol"""
     try:
         df = fetch_klines(symbol, MAIN_INTERVAL, FETCH_CANDLES)
+        if df is None or len(df) < 50:
+            print(f"⚠  Insufficient data for {symbol}")
+            return None
     except Exception as e:
-        print("Klines fetch error", symbol, e)
+        print(f"Error analyzing {symbol}: {e}")
         return None
 
-    # compute indicators
-    df['close_f'] = df['close'].astype(float)
-    df['volume_f'] = df['volume'].astype(float)
-    df['EMA9'] = ema(df['close_f'], 9)
-    df['EMA21'] = ema(df['close_f'], 21)
-    df['RSI14'] = rsi(df['close_f'], 14)
-    df['VWAP'] = vwap(df)
-    df['ATR14'] = atr(df, 14)
+    # Calculate technical indicators
+    try:
+        df['EMA9'] = ema(df['close'], 9)
+        df['EMA21'] = ema(df['close'], 21)
+        df['RSI14'] = rsi(df['close'], 14)
+        df['VWAP'] = vwap(df)
+        df['ATR14'] = atr(df, 14)
+    except Exception as e:
+        print(f"Indicator calculation error for {symbol}: {e}")
+        return None
 
+    # Get latest values
     latest = df.iloc[-1]
     prev = df.iloc[-2]
 
-    price = float(latest['close_f'])
+    price = float(latest['close'])
     ema9 = float(latest['EMA9'])
     ema21 = float(latest['EMA21'])
     rsi14 = float(latest['RSI14'])
     vwap_now = float(latest['VWAP'])
     atr_now = float(latest['ATR14'])
-    last_vol = float(latest['volume_f'])
-    avg_vol = float(df['volume_f'][-30:].mean())
+    last_vol = float(latest['volume'])
+    avg_vol = float(df['volume'][-30:].mean())
 
-    # volume spike
+    # Volume analysis
     vol_spike = last_vol > (avg_vol * VOLUME_SPIKE_MULTIPLIER)
+    volume_ratio = last_vol / (avg_vol + 1e-9)
 
-    # EMA trend and crossover
+    # EMA analysis
     ema_trend = "bull" if ema9 > ema21 else "bear"
-    crossover = None
-    # check if crossover happened in last candle
+    ema_gap = abs(ema9 - ema21) / (price + 1e-9) * 100
+    strong_trend = ema_gap > 0.5
+
+    # Check for EMA crossover
     prev_ema9 = float(prev['EMA9'])
     prev_ema21 = float(prev['EMA21'])
+    crossover = None
     if prev_ema9 <= prev_ema21 and ema9 > ema21:
         crossover = "bullish"
     elif prev_ema9 >= prev_ema21 and ema9 < ema21:
         crossover = "bearish"
 
-    # ENHANCED RSI CONDITIONS - More selective
-    rsi_oversold = rsi14 < 30  # Strong oversold
-    rsi_overbought = rsi14 > 70  # Strong overbought
-    rsi_moderate_buy = 30 <= rsi14 < 45  # Moderate buy zone
-    rsi_moderate_sell = 55 < rsi14 <= 70  # Moderate sell zone
+    # RSI analysis
+    rsi_oversold = rsi14 < 30
+    rsi_overbought = rsi14 > 70
+    rsi_moderate_buy = 30 <= rsi14 < 45
+    rsi_moderate_sell = 55 < rsi14 <= 70
 
-    # Orderbook imbalance
-    ob = fetch_orderbook(symbol, limit=ORDERBOOK_DEPTH)
+    # Orderbook analysis
+    ob = fetch_orderbook(symbol, ORDERBOOK_DEPTH)
     bids = ob.get('bids', [])[:ORDERBOOK_DEPTH]
     asks = ob.get('asks', [])[:ORDERBOOK_DEPTH]
-    sum_bids = sum([float(b[1]) for b in bids]) if bids else 0.0
-    sum_asks = sum([float(a[1]) for a in asks]) if asks else 0.0
-    imbalance = (sum_bids - sum_asks) / (sum_bids + sum_asks + 1e-9)  # -1..1
-    # positive imbalance -> more bids (bullish), negative -> more asks (bearish)
+    
+    sum_bids = sum(float(b[1]) for b in bids) if bids else 0.0
+    sum_asks = sum(float(a[1]) for a in asks) if asks else 0.0
+    imbalance = (sum_bids - sum_asks) / (sum_bids + sum_asks + 1e-9)
 
-    # price change percent last candle vs previous close
-    prev_close = float(prev['close_f'])
+    # Price momentum
+    prev_close = float(prev['close'])
     price_change_pct = ((price - prev_close) / (prev_close + 1e-9)) * 100
 
-    # ADVANCED SIGNAL FILTERING - Only strongest signals pass
-    # Multiple confirmation system for higher accuracy
-    score = 50  # base
-    reasons = []
-    confirmation_count = 0  # Track how many confirmations we have
+    # VWAP analysis
+    vwap_distance = ((price - vwap_now) / (vwap_now + 1e-9)) * 100
 
-    # ENHANCED EMA ANALYSIS with trend strength
-    ema_gap = abs(ema9 - ema21) / price * 100  # EMA separation as %
-    strong_trend = ema_gap > 0.5  # Strong trend if EMAs are well separated
-    
+    # Signal scoring system
+    score = 50  # Neutral starting point
+    reasons = []
+    confirmation_count = 0
+
+    # EMA Scoring
     if crossover == "bullish":
         score += 20
         confirmation_count += 1
@@ -195,18 +242,15 @@ def analyze_symbol(symbol):
         if strong_trend:
             score -= 10
             reasons.append("💪 Strong bearish trend")
-    else:
-        # Current trend strength bonus
-        if ema_trend == "bull" and strong_trend:
+    elif strong_trend:
+        if ema_trend == "bull":
             score += 8
-            confirmation_count += 1
             reasons.append("📈 Strong bull trend")
-        elif ema_trend == "bear" and strong_trend:
+        else:
             score -= 8
-            confirmation_count += 1
             reasons.append("📉 Strong bear trend")
 
-    # ENHANCED RSI SCORING
+    # RSI Scoring
     if rsi_oversold:
         score += 20
         confirmation_count += 1
@@ -223,25 +267,24 @@ def analyze_symbol(symbol):
         score -= 10
         reasons.append("🟡 RSI in sell zone")
 
-    # ENHANCED VOLUME ANALYSIS
-    volume_ratio = last_vol / avg_vol
-    if volume_ratio >= 2.5:  # Extreme volume spike
+    # Volume Scoring
+    if volume_ratio >= 2.5:
         score += 25
         confirmation_count += 1
         reasons.append(f"🚀 Extreme volume spike ({volume_ratio:.1f}x)")
-    elif vol_spike:  # Normal volume spike
+    elif vol_spike:
         score += 15
         reasons.append(f"📈 Volume spike ({volume_ratio:.1f}x)")
 
-    # ENHANCED ORDERBOOK ANALYSIS
-    if imbalance > 0.25:  # Strong bid pressure
+    # Orderbook Scoring
+    if imbalance > 0.25:
         score += 18
         confirmation_count += 1
         reasons.append(f"💪 Strong bid pressure ({imbalance:.2f})")
     elif imbalance > 0.12:
         score += 10
         reasons.append(f"📊 Orderbook bid-heavy ({imbalance:.2f})")
-    elif imbalance < -0.25:  # Strong ask pressure
+    elif imbalance < -0.25:
         score -= 18
         confirmation_count += 1
         reasons.append(f"💪 Strong ask pressure ({imbalance:.2f})")
@@ -249,15 +292,15 @@ def analyze_symbol(symbol):
         score -= 10
         reasons.append(f"📊 Orderbook ask-heavy ({imbalance:.2f})")
 
-    # ENHANCED MOMENTUM ANALYSIS
-    if price_change_pct > 1.0:  # Strong positive momentum
+    # Momentum Scoring
+    if price_change_pct > 1.0:
         score += 15
         confirmation_count += 1
         reasons.append(f"🚀 Strong momentum (+{price_change_pct:.2f}%)")
     elif price_change_pct > 0.5:
         score += 8
         reasons.append(f"📈 Good momentum (+{price_change_pct:.2f}%)")
-    elif price_change_pct < -1.0:  # Strong negative momentum
+    elif price_change_pct < -1.0:
         score -= 15
         confirmation_count += 1
         reasons.append(f"📉 Strong decline ({price_change_pct:.2f}%)")
@@ -265,16 +308,15 @@ def analyze_symbol(symbol):
         score -= 8
         reasons.append(f"📉 Weak momentum ({price_change_pct:.2f}%)")
 
-    # ENHANCED VWAP FILTER
-    vwap_distance = ((price - vwap_now) / vwap_now) * 100
-    if vwap_distance > 0.5:  # Significantly above VWAP
+    # VWAP Scoring
+    if vwap_distance > 0.5:
         score += 12
         confirmation_count += 1
         reasons.append(f"📊 Strong above VWAP (+{vwap_distance:.2f}%)")
     elif price > vwap_now:
         score += 6
         reasons.append(f"📊 Above VWAP (+{vwap_distance:.2f}%)")
-    elif vwap_distance < -0.5:  # Significantly below VWAP
+    elif vwap_distance < -0.5:
         score -= 12
         confirmation_count += 1
         reasons.append(f"📊 Strong below VWAP ({vwap_distance:.2f}%)")
@@ -282,33 +324,25 @@ def analyze_symbol(symbol):
         score -= 6
         reasons.append(f"📊 Below VWAP ({vwap_distance:.2f}%)")
 
-    # Calculate confidence based on signal strength (distance from neutral)
-    # Use absolute value so both strong BUY and SELL signals have high confidence
-    confidence = max(0, min(100, int(abs(score - 50) * 2)))  # Scale to 0-100
+    # Calculate final confidence
+    confidence = max(0, min(100, int(abs(score - 50) * 2)))
 
-    # ADVANCED SIGNAL DETERMINATION - Only strongest signals
+    # Signal determination
     action = None
-    
-    # Require multiple confirmations for high-confidence signals
     min_confirmations = 3 if confidence >= 80 else 2
     
     if confidence >= MIN_CONFIDENCE_TO_ALERT and confirmation_count >= min_confirmations:
-        if score >= 75:  # Strong bullish signal
+        if score >= 75:
             action = "BUY"
-        elif score <= 25:  # Strong bearish signal
+        elif score <= 25:
             action = "SELL"
-        else:
-            # Even with good confidence, reject if signal not decisive enough
-            reasons.append(f"❌ Rejected: Signal not decisive (score: {score})")
-    elif confidence >= MIN_CONFIDENCE_TO_ALERT:
-        reasons.append(f"❌ Rejected: Only {confirmation_count}/{min_confirmations} confirmations")
 
-    # Risk & SL/TP calc (use ATR)
-    sl = None; tp = None; position_size = None
+    # Risk management calculations
+    sl = tp = position_size = None
     if action:
-        # SL distance = ATR * multiplier (scalpers prefer small ATR multiple)
         atr_ticks = max(atr_now, 1e-6)
-        sl_distance = atr_ticks * 1.0  # 1*ATR for tight SL (scalp)
+        sl_distance = atr_ticks * 1.0
+        
         if action == "BUY":
             sl = price - sl_distance
             tp = price + sl_distance * RR_RATIO
@@ -316,18 +350,15 @@ def analyze_symbol(symbol):
             sl = price + sl_distance
             tp = price - sl_distance * RR_RATIO
 
-        # risk amount in USDT
         risk_amount = ACCOUNT_BALANCE_USDT * (RISK_PER_TRADE_PERCENT / 100.0)
-        # position size = risk_amount / |entry - sl|
-        price_diff = abs(price - sl) if abs(price - sl) > 1e-9 else 1e-9
-        position_size = risk_amount / price_diff
-        # limit position size sanity
-        max_pos = (ACCOUNT_BALANCE_USDT * 0.2) / price  # don't use >20% of account in a single pos
+        price_diff = abs(price - sl)
+        position_size = risk_amount / price_diff if price_diff > 1e-9 else 0
+        max_pos = (ACCOUNT_BALANCE_USDT * 0.2) / price
         position_size = min(position_size, max_pos)
 
     # Compose result
-    result = {
-        "symbol": symbol.replace("USDT",""),
+    return {
+        "symbol": symbol.replace("USDT", ""),
         "price": price,
         "ema9": ema9, "ema21": ema21, "rsi14": rsi14,
         "vwap": vwap_now, "atr": atr_now,
@@ -342,77 +373,93 @@ def analyze_symbol(symbol):
         "reasons": reasons,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     }
-    return result
 
 # -------------------- Logging --------------------
 def log_signal(res):
-    header = ["timestamp","symbol","action","price","sl","tp","position_size","confidence","reasons","volume","avg_volume","orderbook_imbalance"]
-    write_header = False
+    """Log signals to CSV file"""
     try:
-        with open(LOG_CSV, 'r', newline='') as f:
-            pass
-    except FileNotFoundError:
-        write_header = True
-
-    with open(LOG_CSV, 'a', newline='') as f:
-        writer = csv.writer(f)
-        if write_header:
-            writer.writerow(header)
-        writer.writerow([
-            res["timestamp"], res["symbol"], res["action"], res["price"],
-            res["sl"], res["tp"], res["position_size"], res["confidence"],
-            ";".join(res["reasons"]), res["volume"], res["avg_volume"], res["orderbook_imbalance"]
-        ])
+        file_exists = os.path.exists(LOG_CSV)
+        with open(LOG_CSV, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow([
+                    "timestamp", "symbol", "action", "price", "sl", "tp",
+                    "position_size", "confidence", "reasons", "volume",
+                    "avg_volume", "orderbook_imbalance"
+                ])
+            writer.writerow([
+                res["timestamp"], res["symbol"], res["action"], res["price"],
+                res["sl"], res["tp"], res["position_size"], res["confidence"],
+                ";".join(res["reasons"]), res["volume"], res["avg_volume"],
+                res["orderbook_imbalance"]
+            ])
+    except Exception as e:
+        print(f"Error logging signal: {e}")
 
 # -------------------- Main Loop --------------------
 def main_loop():
-    print("🚀 Pro Scalper Bot started at", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"))
+    """Main trading loop"""
+    print(f"🚀 Pro Scalper Bot started at {datetime.now(timezone.utc)}")
+    print(f"📊 Monitoring symbols: {', '.join(SYMBOLS)}")
+    print(f"⏰ Check interval: {CHECK_INTERVAL} seconds")
+    
+    if TEST_MODE:
+        print("🔶 Running in TEST MODE - No Telegram notifications")
+    else:
+        print("✅ Telegram notifications ENABLED")
+    
     scan_count = 0
+    
     while True:
         try:
             scan_count += 1
-            print(f"🔍 Scan #{scan_count} - Analyzing {len(SYMBOLS)} symbols...")
+            print(f"\n🔍 Scan #{scan_count} - {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
             
-            for sym in SYMBOLS:
-                res = analyze_symbol(sym)
-                if not res:
-                    print(f"❌ {sym}: Failed to analyze")
+            for symbol in SYMBOLS:
+                result = analyze_symbol(symbol)
+                if not result:
                     continue
 
-                # Show analysis results for transparency
-                print(f"📈 {res['symbol']}: Price=${res['price']:.4f}, Confidence={res['confidence']}%, Confirmations={res['confirmations']}")
-                if res['reasons']:
-                    print(f"   Reasons: {', '.join(res['reasons'][:3])}...")  # Show first 3 reasons
+                # Display analysis results
+                status_icon = "✅" if result['action'] else "➖"
+                print(f"{status_icon} {result['symbol']}: "
+                      f"${result['price']:.4f} | "
+                      f"Conf: {result['confidence']}% | "
+                      f"Confirmations: {result['confirmations']}")
 
-                # If there's an actionable signal, send Telegram alert
-                if res["action"]:
+                # Send alert for actionable signals
+                if result["action"]:
                     message = (
-                        f"🚨 <b>#{res['symbol']} {res['action']} Signal</b>\n"
-                        f"🕜 {res['timestamp']}\n"
-                        f"💰 Price: {res['price']:.8f} USDT\n"
-                        f"📈 Change(last candle): {res['price_change_pct']:.2f}%\n"
-                        f"📊 Volume: {res['volume']:.2f} (avg {res['avg_volume']:.2f})\n"
-                        f"🔎 Reasons: {', '.join(res['reasons'])}\n\n"
-                        f"🎯 TP: {res['tp']:.8f}\n"
-                        f"🛑 SL: {res['sl']:.8f}\n"
-                        f"⚖️ Position size (est): {res['position_size']:.6f} {res['symbol']}\n"
-                        f"✅ Confidence: {res['confidence']}% | Confirmations: {res['confirmations']}\n"
-                        f"Risk per trade: {RISK_PER_TRADE_PERCENT}% of ${ACCOUNT_BALANCE_USDT}\n"
+                        f"🚨 <b>#{result['symbol']} {result['action']} Signal</b>\n"
+                        f"🕜 {result['timestamp']}\n"
+                        f"💰 Price: {result['price']:.8f}\n"
+                        f"📈 Change: {result['price_change_pct']:.2f}%\n"
+                        f"📊 Volume: {result['volume']:.2f} (avg {result['avg_volume']:.2f})\n"
+                        f"🔎 Reasons: {', '.join(result['reasons'][:3])}\n\n"
+                        f"🎯 TP: {result['tp']:.8f}\n"
+                        f"🛑 SL: {result['sl']:.8f}\n"
+                        f"⚖ Size: {result['position_size']:.6f} {result['symbol']}\n"
+                        f"✅ Confidence: {result['confidence']}%\n"
+                        f"🔢 Confirmations: {result['confirmations']}"
                     )
-                    send_telegram(message)
-                    log_signal(res)
-                    print(f"🚨 SIGNAL GENERATED: {res['symbol']} {res['action']} - Confidence: {res['confidence']}%")
+                    
+                    if send_telegram(message):
+                        print(f"📢 Telegram alert sent for {result['symbol']}")
+                    log_signal(result)
+                    print(f"🚨 SIGNAL: {result['symbol']} {result['action']} "
+                          f"(Conf: {result['confidence']}%)")
 
-                # small delay per symbol to avoid rate limits
-                time.sleep(0.8)
+                time.sleep(0.5)  # Rate limiting between symbols
                 
-            print(f"✅ Scan #{scan_count} completed. Waiting {CHECK_INTERVAL}s for next scan...\n")
+            print(f"⏳ Next scan in {CHECK_INTERVAL} seconds...")
+            time.sleep(CHECK_INTERVAL)
+            
+        except KeyboardInterrupt:
+            print("\n🛑 Bot stopped by user")
+            break
         except Exception as e:
-            print("❌ Main loop exception:", e)
-            import traceback
-            traceback.print_exc()
-        # Wait before next full scan
-        time.sleep(CHECK_INTERVAL)
+            print(f"❌ Main loop error: {e}")
+            time.sleep(60)  # Wait longer on critical errors
 
 if __name__ == "__main__":
     main_loop()
